@@ -1,0 +1,246 @@
+name: Build wheels
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Determine which packages need building
+  # ---------------------------------------------------------------------------
+  check:
+    name: Check for existing wheels
+    runs-on: ubuntu-latest
+    outputs:
+      flatbuffers_needed: ${{ steps.check.outputs.flatbuffers_needed }}
+      wabt_needed: ${{ steps.check.outputs.wabt_needed }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PyPI for existing wheels
+        id: check
+        shell: python
+        run: |
+          import os, re, urllib.request
+
+          def get_version(path):
+              with open(path) as f:
+                  content = f.read()
+              return re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE).group(1)
+
+          def wheel_exists(pypi_name, version):
+              try:
+                  url = f"https://pypi.halide-lang.org/simple/{pypi_name}/"
+                  index = urllib.request.urlopen(url, timeout=30).read().decode()
+              except Exception:
+                  return False
+              return f"{pypi_name.replace('-', '_')}-{version}-" in index
+
+          fb_version = get_version("packages/flatbuffers/pyproject.toml")
+          wabt_version = get_version("packages/wabt/pyproject.toml")
+
+          fb_needed = not wheel_exists("halide-flatbuffers", fb_version)
+          wabt_needed = not wheel_exists("halide-wabt", wabt_version)
+
+          print(f"halide-flatbuffers {fb_version}: {'needed' if fb_needed else 'up to date'}")
+          print(f"halide-wabt {wabt_version}: {'needed' if wabt_needed else 'up to date'}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"flatbuffers_needed={'true' if fb_needed else 'false'}\n")
+              f.write(f"wabt_needed={'true' if wabt_needed else 'false'}\n")
+              f.write(f"should_build={'true' if (fb_needed or wabt_needed) else 'false'}\n")
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Build wheels for all packages and platforms
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.pkg }} / ${{ matrix.platform }}
+    needs: check
+    if: |
+      needs.check.outputs.should_build == 'true' && (
+        (matrix.pkg == 'flatbuffers' && needs.check.outputs.flatbuffers_needed == 'true') ||
+        (matrix.pkg == 'wabt' && needs.check.outputs.wabt_needed == 'true')
+      )
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [flatbuffers, wabt]
+        platform:
+          - x86-64-linux
+          - x86-32-linux
+          - arm-64-linux
+          - arm-32-linux
+          - x86-64-macos
+          - arm-64-macos
+          - x86-64-windows
+          - x86-32-windows
+        include:
+          - platform: x86-64-linux
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            manylinux_plat: manylinux_2_28_x86_64
+
+          # i686: Node.js 20 has no i686 binaries, so actions/checkout
+          # cannot run inside the container. Run on the host and use
+          # docker for the build/repair steps instead.
+          - platform: x86-32-linux
+            runner: ubuntu-latest
+            docker_image: quay.io/pypa/manylinux_2_28_i686
+            manylinux_plat: manylinux_2_28_i686
+            pin_gcc12: true
+
+          - platform: arm-64-linux
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            manylinux_plat: manylinux_2_28_aarch64
+
+          # armv7l: same Node.js issue as i686 -- use docker run.
+          - platform: arm-32-linux
+            runner: ubuntu-24.04-arm
+            docker_image: quay.io/pypa/manylinux_2_31_armv7l
+            manylinux_plat: manylinux_2_31_armv7l
+
+          - platform: x86-64-macos
+            runner: macos-15-intel
+
+          - platform: arm-64-macos
+            runner: macos-15
+
+          - platform: x86-64-windows
+            runner: windows-latest
+            msvc_arch: amd64
+
+          - platform: x86-32-windows
+            runner: windows-latest
+            msvc_arch: amd64_x86
+            wheel_plat: win32
+
+    env:
+      CMAKE_GENERATOR: Ninja
+      MACOSX_DEPLOYMENT_TARGET: "11"
+
+    steps:
+      # ---- Checkout ----
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ---- Toolchain (manylinux containers) ----
+      # Pin GCC 12 to avoid GCC 14 libstdc++ symbols leaking into the wheel.
+      - name: Set up GCC 12 and Python (manylinux)
+        if: matrix.container
+        run: |
+          yum install -y gcc-toolset-12-gcc-c++
+          echo "/opt/rh/gcc-toolset-12/root/usr/bin" >> "$GITHUB_PATH"
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      # ---- Python (non-container, non-docker) ----
+      - name: Set up Python
+        if: ${{ !matrix.container && !matrix.docker_image }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ---- MSVC (Windows) ----
+      - name: Set up MSVC
+        if: matrix.msvc_arch
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      # ---- Build tools (non-container, non-docker) ----
+      - name: Install CMake and Ninja
+        if: ${{ !matrix.container && !matrix.docker_image }}
+        run: pip install cmake ninja
+
+      # ---- Build wheel ----
+      - name: Build wheel
+        if: ${{ !matrix.docker_image }}
+        run: pip wheel packages/${{ matrix.pkg }} -w dist/
+
+      # ---- Build wheel (docker, for i686 and armv7l) ----
+      - name: Build wheel (docker)
+        if: matrix.docker_image
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" \
+            -w /project \
+            -e PIN_GCC12=${{ matrix.pin_gcc12 && 'true' || 'false' }} \
+            ${{ matrix.docker_image }} \
+            bash -c '
+              set -euo pipefail
+              if [ "$PIN_GCC12" = "true" ]; then
+                yum install -y gcc-toolset-12-gcc-c++
+                export PATH="/opt/rh/gcc-toolset-12/root/usr/bin:$PATH"
+              fi
+              export PATH="/opt/python/cp312-cp312/bin:$PATH"
+              pip install cmake ninja
+              pip wheel packages/${{ matrix.pkg }} -w dist/
+            '
+
+      # ---- Retag wheel (scikit-build-core bug: x86 cross-compile gets win_amd64) ----
+      - name: Retag wheel
+        if: matrix.wheel_plat
+        shell: bash
+        run: |
+          pip install wheel
+          wheel tags --platform-tag ${{ matrix.wheel_plat }} --remove dist/*.whl
+
+      # ---- Repair wheel (auditwheel, in container) ----
+      - name: Repair wheel (auditwheel)
+        if: ${{ matrix.manylinux_plat && !matrix.docker_image }}
+        run: |
+          pip install auditwheel
+          auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl
+          rm -f dist/*-linux_*.whl
+
+      # ---- Repair wheel (auditwheel via docker, for i686 and armv7l) ----
+      - name: Repair wheel (auditwheel/docker)
+        if: ${{ matrix.manylinux_plat && matrix.docker_image }}
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" \
+            -w /project \
+            ${{ matrix.docker_image }} \
+            bash -c '
+              set -euo pipefail
+              export PATH="/opt/python/cp312-cp312/bin:$PATH"
+              pip install auditwheel
+              auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl
+              rm -f dist/*-linux_*.whl
+            '
+
+      # ---- Upload artifact ----
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.pkg }}-${{ matrix.platform }}
+          path: dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Upload all wheels to private PyPI
+  # ---------------------------------------------------------------------------
+  upload:
+    name: Upload to PyPI
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: upload
+          TWINE_PASSWORD: ${{ secrets.PYPI_UPLOAD_PASSWORD }}
+          TWINE_REPOSITORY_URL: https://pypi.halide-lang.org/
+        run: |
+          pip install "twine>=6" "packaging>=24.2"
+          twine upload dist/*.whl
