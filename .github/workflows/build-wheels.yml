@@ -193,7 +193,7 @@ jobs:
           OUT=$(auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl 2>&1) || {
             echo "$OUT"
             echo "$OUT" | grep -q "does not look like a platform wheel" \
-              && auditwheel addtag -w dist/ dist/*.whl \
+              && pip install wheel && wheel tags --platform-tag ${{ matrix.manylinux_plat }} --remove dist/*.whl \
               || exit 1
           }
           rm -f dist/*-linux_*.whl
@@ -213,7 +213,7 @@ jobs:
               OUT=$(auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl 2>&1) || {
                 echo "$OUT"
                 echo "$OUT" | grep -q "does not look like a platform wheel" \
-                  && auditwheel addtag -w dist/ dist/*.whl \
+                  && pip install wheel && wheel tags --platform-tag ${{ matrix.manylinux_plat }} --remove dist/*.whl \
                   || exit 1
               }
               rm -f dist/*-linux_*.whl
