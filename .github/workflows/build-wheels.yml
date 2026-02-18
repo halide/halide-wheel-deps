@@ -184,11 +184,18 @@ jobs:
           wheel tags --platform-tag ${{ matrix.wheel_plat }} --remove dist/*.whl
 
       # ---- Repair wheel (auditwheel, in container) ----
+      # Use repair for wheels with ELF binaries; fall back to addtag for
+      # static-lib/header-only wheels that produce no ELF files.
       - name: Repair wheel (auditwheel)
         if: ${{ matrix.manylinux_plat && !matrix.docker_image }}
         run: |
           pip install auditwheel
-          auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl
+          OUT=$(auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl 2>&1) || {
+            echo "$OUT"
+            echo "$OUT" | grep -q "does not look like a platform wheel" \
+              && auditwheel addtag -w dist/ dist/*.whl \
+              || exit 1
+          }
           rm -f dist/*-linux_*.whl
 
       # ---- Repair wheel (auditwheel via docker, for i686 and armv7l) ----
@@ -203,7 +210,12 @@ jobs:
               set -euo pipefail
               export PATH="/opt/python/cp312-cp312/bin:$PATH"
               pip install auditwheel
-              auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl
+              OUT=$(auditwheel repair --plat ${{ matrix.manylinux_plat }} -w dist/ dist/*.whl 2>&1) || {
+                echo "$OUT"
+                echo "$OUT" | grep -q "does not look like a platform wheel" \
+                  && auditwheel addtag -w dist/ dist/*.whl \
+                  || exit 1
+              }
               rm -f dist/*-linux_*.whl
             '
 
