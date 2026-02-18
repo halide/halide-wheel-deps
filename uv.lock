@@ -1,6 +1,23 @@
 version = 1
 revision = 3
-requires-python = ">=3.14"
+requires-python = ">=3.10"
+
+[manifest]
+members = [
+    "halide-flatbuffers",
+    "halide-wabt",
+    "halide-wheel-deps",
+]
+
+[[package]]
+name = "halide-flatbuffers"
+version = "23.5.26"
+source = { editable = "packages/flatbuffers" }
+
+[[package]]
+name = "halide-wabt"
+version = "1.0.39"
+source = { editable = "packages/wabt" }
 
 [[package]]
 name = "halide-wheel-deps"

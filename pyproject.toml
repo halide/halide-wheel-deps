@@ -1,7 +1,10 @@
 [project]
 name = "halide-wheel-deps"
 version = "0.1.0"
-description = "Add your description here"
+description = "Python wheels for C++ dependencies of Halide (flatbuffers, wabt)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/flatbuffers", "packages/wabt"]

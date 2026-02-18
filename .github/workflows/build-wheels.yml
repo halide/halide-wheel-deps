@@ -12,8 +12,6 @@ jobs:
     name: Check for existing wheels
     runs-on: ubuntu-latest
     outputs:
-      flatbuffers_needed: ${{ steps.check.outputs.flatbuffers_needed }}
-      wabt_needed: ${{ steps.check.outputs.wabt_needed }}
       should_build: ${{ steps.check.outputs.should_build }}
     steps:
       - uses: actions/checkout@v4
@@ -57,11 +55,7 @@ jobs:
   build:
     name: ${{ matrix.pkg }} / ${{ matrix.platform }}
     needs: check
-    if: |
-      needs.check.outputs.should_build == 'true' && (
-        (matrix.pkg == 'flatbuffers' && needs.check.outputs.flatbuffers_needed == 'true') ||
-        (matrix.pkg == 'wabt' && needs.check.outputs.wabt_needed == 'true')
-      )
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container || '' }}
     strategy:
