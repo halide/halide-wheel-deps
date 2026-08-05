@@ -13,33 +13,37 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
+      flatbuffers_version: ${{ steps.check.outputs.flatbuffers_version }}
+      wabt_version: ${{ steps.check.outputs.wabt_version }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check PyPI for existing wheels
+      - name: Check halide/pypi for existing releases
         id: check
         shell: python
         run: |
-          import os, re, urllib.request
+          import os, re, urllib.error, urllib.request
 
           def get_version(path):
               with open(path) as f:
                   content = f.read()
               return re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE).group(1)
 
-          def wheel_exists(pypi_name, version):
+          def release_exists(tag):
+              url = f"https://api.github.com/repos/halide/pypi/releases/tags/{tag}"
               try:
-                  url = f"https://pypi.halide-lang.org/simple/{pypi_name}/"
-                  index = urllib.request.urlopen(url, timeout=30).read().decode()
-              except Exception:
-                  return False
-              return f"{pypi_name.replace('-', '_')}-{version}-" in index
+                  urllib.request.urlopen(url, timeout=30)
+                  return True
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      return False
+                  raise
 
           fb_version = get_version("packages/flatbuffers/pyproject.toml")
           wabt_version = get_version("packages/wabt/pyproject.toml")
 
-          fb_needed = not wheel_exists("halide-flatbuffers", fb_version)
-          wabt_needed = not wheel_exists("halide-wabt", wabt_version)
+          fb_needed = not release_exists(f"halide-flatbuffers-{fb_version}")
+          wabt_needed = not release_exists(f"halide-wabt-{wabt_version}")
 
           print(f"halide-flatbuffers {fb_version}: {'needed' if fb_needed else 'up to date'}")
           print(f"halide-wabt {wabt_version}: {'needed' if wabt_needed else 'up to date'}")
@@ -47,6 +51,8 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"flatbuffers_needed={'true' if fb_needed else 'false'}\n")
               f.write(f"wabt_needed={'true' if wabt_needed else 'false'}\n")
+              f.write(f"flatbuffers_version={fb_version}\n")
+              f.write(f"wabt_version={wabt_version}\n")
               f.write(f"should_build={'true' if (fb_needed or wabt_needed) else 'false'}\n")
 
   # ---------------------------------------------------------------------------
@@ -227,13 +233,15 @@ jobs:
           path: dist/*.whl
 
   # ---------------------------------------------------------------------------
-  # Job 3: Upload all wheels to private PyPI
+  # Job 3: Publish wheels as halide/pypi releases
   # ---------------------------------------------------------------------------
   upload:
-    name: Upload to PyPI
-    needs: build
+    name: Publish to halide/pypi
+    needs: [check, build]
     if: needs.build.result == 'success'
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PYPI_RELEASES_TOKEN }}
     steps:
       - name: Download all wheel artifacts
         uses: actions/download-artifact@v4
@@ -242,11 +250,38 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      - name: Upload to PyPI
-        env:
-          TWINE_USERNAME: upload
-          TWINE_PASSWORD: ${{ secrets.PYPI_UPLOAD_PASSWORD }}
-          TWINE_REPOSITORY_URL: https://pypi.halide-lang.org/
+      - name: Publish releases
         run: |
-          pip install "twine>=6" "packaging>=24.2"
-          twine upload dist/*.whl
+          set -euo pipefail
+
+          publish_project() {
+            local tag="$1" glob="$2"
+            shopt -s nullglob
+            # shellcheck disable=SC2206  # intentional glob expansion, not word splitting
+            local files=(dist/${glob})
+            shopt -u nullglob
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "no files matching '$glob', skipping $tag"
+              return
+            fi
+
+            python3 -c '
+          import hashlib, json, sys
+          manifest = {f.split("/")[-1]: hashlib.sha256(open(f, "rb").read()).hexdigest() for f in sys.argv[1:]}
+          json.dump(manifest, open("dist/manifest.json", "w"))
+          ' "${files[@]}"
+
+            if gh release view "$tag" --repo halide/pypi >/dev/null 2>&1; then
+              gh release upload "$tag" "${files[@]}" dist/manifest.json --repo halide/pypi --clobber
+            else
+              gh release create "$tag" "${files[@]}" dist/manifest.json \
+                --repo halide/pypi --title "$tag" --notes "Automated build from halide-wheel-deps"
+            fi
+            rm -f dist/manifest.json
+          }
+
+          publish_project "halide-flatbuffers-${{ needs.check.outputs.flatbuffers_version }}" "halide_flatbuffers-*.whl"
+          publish_project "halide-wabt-${{ needs.check.outputs.wabt_version }}" "halide_wabt-*.whl"
+
+      - name: Trigger index rebuild
+        run: gh workflow run rebuild-index.yml --repo halide/pypi
