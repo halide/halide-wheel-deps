@@ -42,8 +42,8 @@ jobs:
           fb_version = get_version("packages/flatbuffers/pyproject.toml")
           wabt_version = get_version("packages/wabt/pyproject.toml")
 
-          fb_needed = not release_exists(f"halide-flatbuffers-{fb_version}")
-          wabt_needed = not release_exists(f"halide-wabt-{wabt_version}")
+          fb_needed = not release_exists(f"halide-flatbuffers@{fb_version}")
+          wabt_needed = not release_exists(f"halide-wabt@{wabt_version}")
 
           print(f"halide-flatbuffers {fb_version}: {'needed' if fb_needed else 'up to date'}")
           print(f"halide-wabt {wabt_version}: {'needed' if wabt_needed else 'up to date'}")
@@ -280,8 +280,8 @@ jobs:
             rm -f dist/manifest.json
           }
 
-          publish_project "halide-flatbuffers-${{ needs.check.outputs.flatbuffers_version }}" "halide_flatbuffers-*.whl"
-          publish_project "halide-wabt-${{ needs.check.outputs.wabt_version }}" "halide_wabt-*.whl"
+          publish_project "halide-flatbuffers@${{ needs.check.outputs.flatbuffers_version }}" "halide_flatbuffers-*.whl"
+          publish_project "halide-wabt@${{ needs.check.outputs.wabt_version }}" "halide_wabt-*.whl"
 
       - name: Trigger index rebuild
         run: gh workflow run rebuild-index.yml --repo halide/pypi
